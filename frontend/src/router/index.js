@@ -18,7 +18,13 @@ const router = createRouter({
             path: '/recognize',
             name: 'recognize',
             component: () => import('../views/RecognizeView.vue'),
+        },
+        {
+            path: '/violation',
+            name: 'violation',
+            component: () => import('../views/ViolationView.vue'),
         }
+
     ],
 })
 

@@ -12,7 +12,7 @@
                 </div>
             </div>
         </div>
-        <div class="card-body">
+        <div class="card-body shadow">
             <div class="d-flex">
                 <video ref="video" autoplay playsinline style="width:320px;height:240px;" />
                 <canvas ref="canvas" class="ms-3" style="width:320px;height:240px;display:block;" />
@@ -20,6 +20,13 @@
                     <label class="fw-bold">Nama Lengkap</label>
                     <div v-if="names.length">
                         <div class="text-capitalize" v-for="name in names" :key="name">{{ name }}</div>
+                        <div v-if="detections.length" class="text-muted small">
+                            <div v-for="(det, idx) in detections" :key="'meta-'+idx">
+                                <span v-if="det.age !== undefined && det.age !== null">{{ det.age }}</span>
+                                <span v-if="(det.age !== undefined && det.age !== null) && det.gender"> • </span>
+                                <span v-if="det.gender">{{ formatGender(det.gender) }}</span>
+                            </div>
+                        </div>
                     </div>
                     <div>{{ error }}</div>
                 </div>
@@ -34,8 +41,15 @@ import { ref, onMounted } from 'vue';
 const video = ref(null);
 const canvas = ref(null);
 const names = ref([]);
+const detections = ref([]);
 const error = ref('');
 let stream = null;
+
+// Format gender nicely in UI
+function formatGender(g) {
+    return (g || '').toString().trim().toLowerCase().replace(/^\w/, c => c.toUpperCase());
+}
+
 let intervalId = null;
 
 // Fungsi TTS dengan bahasa Indonesia
@@ -169,6 +183,8 @@ const captureAndRecognize = async () => {
                     body: formData
                 });
                 const data = await res.json();
+                detections.value = (Array.isArray(data) ? data : (data?.results ?? []))
+                    .map(r => ({ name: r?.name ?? 'unknown', age: r?.age ?? null, gender: r?.gender ?? '', box: r?.box, distance: r?.distance }));
                 names.value = data.map(f => f.name);
                 error.value = '';
                 // **Panggil TTS berbahasa Indonesia untuk setiap nama yang valid**

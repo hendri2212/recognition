@@ -1,6 +1,9 @@
-from fastapi import APIRouter, UploadFile, File, HTTPException, Depends
-from sqlalchemy.orm import Session
+from typing import List, Optional, Literal
+
 import numpy as np
+from fastapi import APIRouter, UploadFile, File, HTTPException, Depends
+from pydantic import BaseModel, Field
+from sqlalchemy.orm import Session
 
 from app.services.face import extract_embedding
 from app.models.person import Person
@@ -12,54 +15,105 @@ router = APIRouter()
 # Cosine distance threshold (0–2 range, typical threshold ~0.4)
 THRESHOLD = 0.4
 
-@router.post("/recognize")
+
+class RecognizeItem(BaseModel):
+    """Single face recognition result."""
+    box: list[int] = Field(..., min_length=4, max_length=4)
+    name: str
+    distance: float
+    age: Optional[int] = None
+    gender: Optional[Literal["male", "female"]] = None
+
+
+def _cosine_distance_normalized(a: np.ndarray, b: np.ndarray) -> float:
+    """
+    Compute cosine distance (1 - cosine similarity) assuming a and b are already L2-normalized.
+    Clamps dot product to [-1, 1] to avoid tiny numerical drift.
+    """
+    sim = float(np.clip(np.dot(a, b), -1.0, 1.0))
+    return 1.0 - sim
+
+
+def _normalize(v: np.ndarray) -> np.ndarray:
+    norm = float(np.linalg.norm(v))
+    if norm <= 0.0 or not np.isfinite(norm):
+        return v
+    return v / norm
+
+
+@router.post("/recognize", response_model=List[RecognizeItem])
 async def recognize(
     file: UploadFile = File(...),
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
 ):
     """
-    Recognize faces in an uploaded image.
-    Returns a list of recognition results (bounding boxes, names, distances).
+    Recognize faces in an uploaded image and (optionally) return age & gender if provided by service layer.
+    Returns a list of recognition results (bounding boxes, names, distances, age, gender).
     """
-    # Read image bytes
+    # 1) Read image bytes
     img_bytes = await file.read()
 
-    # Extract embeddings for all faces
-    faces = extract_embedding(img_bytes, return_all=True)
+    # 2) Extract embeddings for all faces (with attributes if supported by service)
+    try:
+        faces = extract_embedding(img_bytes, return_all=True, with_attr=True)
+    except TypeError:
+        # Backward compatibility if service doesn't accept with_attr yet
+        faces = extract_embedding(img_bytes, return_all=True)
+
     if not faces:
         raise HTTPException(status_code=400, detail="No faces detected")
 
-    # Load registered persons
-    persons = db.query(Person).filter(Person.mean_embedding != None).all()
+    # 3) Load registered persons that have mean embeddings
+    persons: list[Person] = (
+        db.query(Person).filter(Person.mean_embedding != None).all()  # noqa: E711
+    )
     if not persons:
         raise HTTPException(status_code=404, detail="No registered persons found")
 
-    results = []
-    for face in faces:
-        emb = face['embedding']
-        box = face['box']
-        best = {'name': 'unknown', 'dist': 1.0}
-        for p in persons:
-            blob = p.mean_embedding
-            arr = np.frombuffer(blob, dtype=np.float32)
-            if arr.size != EMB_DIM:
-                continue
-            mean_emb = arr / np.linalg.norm(arr)
-            dist = 1 - float(np.dot(emb, mean_emb))
-            # **DEBUG PRINT per person**  
-            print(f"[DEBUG] Distance ke {p.name}: {dist:.4f}")
-            if dist < best['dist']:
-                best = {'name': p.name, 'dist': dist}
-        
-        # **DEBUG PRINT best match untuk tiap face**  
-        print(f"[DEBUG] Face@{box} → best match: {best['name']} (distance {best['dist']:.4f})")
-        
-        label = best['name'] if best['dist'] < THRESHOLD else 'unknown'
-        results.append({
-            'box': [int(c) for c in box],
-            'name': label,
-            'distance': round(best['dist'], 4)
-        })
+    # Pre-materialize normalized reference embeddings to speed up loop
+    ref_vectors: list[tuple[str, np.ndarray]] = []
+    for p in persons:
+        arr = np.frombuffer(p.mean_embedding, dtype=np.float32)
+        if arr.size != EMB_DIM:
+            # Skip malformed vectors silently
+            continue
+        ref_vectors.append((p.name, _normalize(arr)))
 
-    # Return list directly so frontend can use data.map
+    if not ref_vectors:
+        raise HTTPException(status_code=500, detail="Registered embeddings are malformed")
+
+    results: list[RecognizeItem] = []
+
+    # 4) Match each face against reference vectors
+    for face in faces:
+        emb: np.ndarray = face["embedding"].astype(np.float32, copy=False)
+        emb = _normalize(emb)
+
+        best_name = "unknown"
+        best_dist = 2.0  # max cosine distance in this setup
+
+        for name, mean_emb in ref_vectors:
+            dist = _cosine_distance_normalized(emb, mean_emb)
+            if dist < best_dist:
+                best_dist = dist
+                best_name = name
+
+        label = best_name if best_dist < THRESHOLD else "unknown"
+
+        # Attributes from service (optional)
+        age = face.get("age")
+        gender = face.get("gender")
+        box = [int(c) for c in face["box"]]
+
+        results.append(
+            RecognizeItem(
+                box=box,
+                name=label,
+                distance=round(float(best_dist), 4),
+                age=int(age) if isinstance(age, (int, np.integer)) else None,
+                gender=gender if gender in ("male", "female") else None,
+            )
+        )
+
+    # 5) Return list directly so frontend can use data.map
     return results
