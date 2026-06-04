@@ -11,3 +11,6 @@ class Person(Base):
 
     # Relationship to User samples
     users = relationship('User', back_populates='person')
+    
+    # Relationship to Vehicle
+    vehicles = relationship('Vehicle', back_populates='person')

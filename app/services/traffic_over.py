@@ -8,6 +8,7 @@ from typing import Dict, Any
 from urllib.error import URLError, HTTPError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
+import base64
 from ultralytics import YOLO
 
 # =========================
@@ -23,13 +24,21 @@ helmet_yolo = YOLO(str(HELMET_MODEL_PATH)) if HELMET_MODEL_PATH.exists() else No
 
 OVERLOAD_MODEL_PATH = Path(os.getenv("OVERLOAD_MODEL_PATH", "truck_overload.pt"))
 overload_yolo = YOLO(str(OVERLOAD_MODEL_PATH)) if OVERLOAD_MODEL_PATH.exists() else None
-ROBOFLOW_API_KEY = os.getenv("ROBOFLOW_API_KEY", "").strip()
+ROBOFLOW_API_KEY = os.getenv("ROBOFLOW_API_KEY", "usB9KjLcvNNqmLFZg8hm").strip()
 ROBOFLOW_OVERLOAD_MODEL_ID = os.getenv(
     "ROBOFLOW_OVERLOAD_MODEL_ID",
     "truck-overload-6na0e-cbi6q/1",
 ).strip()
 ROBOFLOW_OVERLOAD_API_URL = os.getenv(
     "ROBOFLOW_OVERLOAD_API_URL",
+    "https://detect.roboflow.com",
+).rstrip("/")
+ROBOFLOW_LP_MODEL_ID = os.getenv(
+    "ROBOFLOW_LP_MODEL_ID",
+    "license-plate-recognition-rxg4e/11",
+).strip()
+ROBOFLOW_LP_API_URL = os.getenv(
+    "ROBOFLOW_LP_API_URL",
     "https://detect.roboflow.com",
 ).rstrip("/")
 
@@ -224,6 +233,15 @@ def detect_traffic_violations(img_bytes: bytes, *, classes=None, return_debug: b
             selected_classes,
         )
         detections = _merge_detections(detections, helmet_detections)
+
+    has_helmet_violation = any(d.get("helmet_violation") for d in detections)
+    if has_helmet_violation:
+        plates = _detect_license_plates_with_roboflow(img_bytes)
+        for d in detections:
+            if d.get("helmet_violation"):
+                plate = _match_license_plate(d["box"], plates)
+                if plate:
+                    d["license_plate"] = plate
 
     if not return_debug:
         return detections
@@ -508,11 +526,101 @@ def _detect_overload_with_roboflow(img_bytes: bytes):
     return detections, "roboflow"
 
 
+import logging
+
+def _detect_license_plates_with_roboflow(img_bytes: bytes):
+    if not ROBOFLOW_API_KEY or not ROBOFLOW_LP_MODEL_ID:
+        return []
+
+    try:
+        img_b64 = base64.b64encode(img_bytes).decode("utf-8")
+        query = urlencode({"api_key": ROBOFLOW_API_KEY, "confidence": 10})
+        url = f"{ROBOFLOW_LP_API_URL}/{ROBOFLOW_LP_MODEL_ID}?{query}"
+        request = Request(
+            url,
+            data=img_b64.encode("utf-8"),
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+            method="POST",
+        )
+        with urlopen(request, timeout=20) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+            try:
+                with open(r"d:\CODE\newface\roboflow_debug.json", "w") as f:
+                    json.dump(payload, f, indent=2)
+            except Exception as e:
+                logging.error(f"Failed to dump debug: {e}")
+    except HTTPError as e:
+        err_msg = e.read().decode("utf-8")
+        with open(r"d:\CODE\newface\roboflow_err.txt", "w") as f:
+            f.write(f"HTTP Error {e.code}: {err_msg}")
+        logging.error(f"Roboflow LP HTTPError: {err_msg}")
+        return []
+    except Exception as e:
+        with open(r"d:\CODE\newface\roboflow_err.txt", "w") as f:
+            f.write(f"Exception: {str(e)}")
+        logging.error(f"Roboflow LP Exception: {e}")
+        return []
+
+    detections = []
+    for pred in payload.get("predictions", []):
+        box = _specialist_prediction_to_box(pred)
+        if box is None:
+            continue
+            
+        # Beberapa model OCR Roboflow menaruh teks di field 'ocr_text', 'text', 'name', atau 'class'
+        plate_text = pred.get("ocr_text") or pred.get("text") or pred.get("name") or pred.get("class", "")
+        plate_text = str(plate_text).strip()
+        
+        # Jika teksnya hanya "license_plate" atau "plate" (label objek, bukan teks plat), kosongkan
+        if plate_text.lower() in ["license_plate", "license-plate", "plate", "vehicle", "car", "motorcycle"]:
+            plate_text = ""
+            
+        if not plate_text:
+            continue
+                    
+        detections.append({
+            "text": plate_text,
+            "box": box,
+            "confidence": float(pred.get("confidence", 0.0)),
+        })
+    return detections
+
+
+def _match_license_plate(target_box, plates):
+    if not plates:
+        return None
+        
+    best_plate = None
+    best_dist = float('inf')
+    
+    tx1, ty1, tx2, ty2 = target_box
+    tcx = (tx1 + tx2) / 2.0
+    tcy = (ty1 + ty2) / 2.0
+    
+    for plate in plates:
+        px1, py1, px2, py2 = plate["box"]
+        pcx = (px1 + px2) / 2.0
+        pcy = (py1 + py2) / 2.0
+        
+        # Cari plat nomor yang jarak titik tengahnya paling dekat dengan objek pelanggar
+        dist = (tcx - pcx)**2 + (tcy - pcy)**2
+        if dist < best_dist:
+            best_dist = dist
+            best_plate = plate["text"]
+            
+    return best_plate
+
+
 def _detect_overload_with_specialist(img: np.ndarray, img_bytes: bytes, conf: float, iou: float, imgsz: int):
     detections, source = _detect_overload_with_local_model(img, conf, iou, imgsz)
     if source == "local":
         return detections, source
     return _detect_overload_with_roboflow(img_bytes)
+
+
+def _overload_model_available(source: str) -> bool:
+    return source in {"local", "roboflow"}
+
 
 def detect_overload(
     img_bytes: bytes,
@@ -520,14 +628,12 @@ def detect_overload(
     conf: float = 0.30,
     iou: float = 0.45,
     imgsz: int = 1280,
-    # fallback options
+    # fallback kandidat truk: tetap kelas truck, hanya lebih sensitif.
     enable_fallback: bool = True,
     fb_conf: float = 0.15,
     fb_imgsz: int = 1536,
-    treat_large_cars_as_truck: bool = True,
-    large_car_area_frac: float = 0.04,   # 4% area frame
-    large_car_aspect: float = 1.60,      # w/h minimal agar dianggap truk-like
-    # analitik overload
+    # heuristik hanya untuk eksperimen lama; jangan jadikan keputusan default.
+    enable_heuristic_decision: bool = False,
     min_edge_pct: float = 0.02,
     cabin_ratio: float = 0.35,
     overload_ratio_thr: float = 0.85,
@@ -539,11 +645,11 @@ def detect_overload(
     """
     Step:
       1) PASS-1: deteksi khusus kelas 'truck' (pakai classes=[truck_id]).
-      2) PASS-2 (fallback, opsional): turunkan conf, naikkan imgsz, ikutkan 'bus' & 'car' lalu
-         seleksi kandidat 'truk-like' (area besar & aspect ratio lebar).
-      3) Untuk tiap kandidat, estimasi garis bak & rasio muatan seperti sebelumnya.
+      2) PASS-2 (fallback, opsional): deteksi ulang kelas 'truck' dengan conf lebih rendah.
+      3) Nilai overload hanya dari model specialist lokal/hosted, kecuali heuristik lama
+         dinyalakan eksplisit untuk eksperimen.
 
-    Output tetap: {"trucks": [ {label, box, overload, ratio, bed_line_found, ...} ]}
+    Output: {"trucks": [...], "overload_supported": bool, "overload_model_source": str}
     """
     img = cv2.imdecode(np.frombuffer(img_bytes, np.uint8), cv2.IMREAD_COLOR)
     if img is None:
@@ -552,8 +658,6 @@ def detect_overload(
     H, W = img.shape[:2]
     names_map = _get_names_map()
     truck_id = _class_id_by_name(names_map, "truck")
-    bus_id   = _class_id_by_name(names_map, "bus")
-    car_id   = _class_id_by_name(names_map, "car")
 
     # ---------- PASS-1: fokus 'truck' ----------
     if truck_id is not None:
@@ -563,7 +667,7 @@ def detect_overload(
         res1 = yolo(img, conf=conf, iou=iou, imgsz=imgsz, verbose=False)[0]
 
     cand_boxes = []
-    cand_labels = []
+    cand_sources = []
 
     if res1.boxes is not None and len(res1.boxes) > 0:
         xyxy = res1.boxes.xyxy.cpu().numpy()
@@ -572,20 +676,15 @@ def detect_overload(
             label = names_map.get(int(c), str(int(c)))
             if str(label).lower() == "truck" or truck_id is None:
                 cand_boxes.append([int(b[0]), int(b[1]), int(b[2]), int(b[3])])
-                cand_labels.append("truck")
+                cand_sources.append("truck_pass")
 
     # ---------- PASS-2 (fallback) ----------
     fb_used = False
     if enable_fallback and len(cand_boxes) == 0:
         fb_used = True
-        fb_classes = []
-        # kalau ada id-nya, batasi kelas agar lebih fokus
-        if truck_id is not None: fb_classes.append(truck_id)
-        if bus_id is not None:   fb_classes.append(bus_id)
-        if car_id is not None:   fb_classes.append(car_id)
         fb_kwargs = dict(conf=fb_conf, iou=iou, imgsz=fb_imgsz, verbose=False)
-        if fb_classes:
-            res2 = yolo(img, classes=fb_classes, **fb_kwargs)[0]
+        if truck_id is not None:
+            res2 = yolo(img, classes=[truck_id], **fb_kwargs)[0]
         else:
             res2 = yolo(img, **fb_kwargs)[0]
 
@@ -594,23 +693,10 @@ def detect_overload(
             clss = res2.boxes.cls.int().cpu().numpy()
             for b, c in zip(xyxy, clss):
                 x1, y1, x2, y2 = [int(v) for v in b]
-                w, h = max(1, x2 - x1), max(1, y2 - y1)
-                area_frac = (w * h) / float(W * H)
-                aspect = w / float(h)
                 label = str(names_map.get(int(c), int(c))).lower()
-
-                is_truck_like = (label == "truck")
-                # ikutkan bus (sering salah label)
-                if label == "bus":
-                    is_truck_like = True
-                # kadang truk jadi car: pakai heuristik ukuran & aspect
-                if treat_large_cars_as_truck and label == "car":
-                    if area_frac >= large_car_area_frac and aspect >= large_car_aspect:
-                        is_truck_like = True
-
-                if is_truck_like:
+                if label == "truck" or truck_id is None:
                     cand_boxes.append([x1, y1, x2, y2])
-                    cand_labels.append("truck")
+                    cand_sources.append("truck_fallback")
 
     specialist_detections, specialist_source = _detect_overload_with_specialist(
         img,
@@ -625,25 +711,39 @@ def detect_overload(
         duplicate = any(_box_iou(det["box"], box) >= 0.50 for box in cand_boxes)
         if not duplicate:
             cand_boxes.append(det["box"])
-            cand_labels.append("truck")
+            cand_sources.append(f"{specialist_source}_specialist")
+
+    overload_supported = _overload_model_available(specialist_source)
+    unavailable_note = (
+        "specialist_overload_model_unavailable"
+        if not overload_supported and not enable_heuristic_decision
+        else None
+    )
 
     # ---------- Jika tetap kosong, kembalikan kosong untuk transparansi ----------
     outputs = []
     if len(cand_boxes) == 0:
-        out = {"trucks": outputs}
+        out = {
+            "trucks": outputs,
+            "overload_supported": overload_supported,
+            "overload_model_source": specialist_source,
+        }
+        if unavailable_note:
+            out["note"] = unavailable_note
         if return_debug:
             out["debug"] = {
                 "pass1_zero": True,
                 "fallback_used": fb_used,
+                "enable_heuristic_decision": enable_heuristic_decision,
                 "specialist_source": specialist_source,
                 "specialist_count": len(specialist_detections),
                 "names_map": names_map,
-                "note": "no_truck_like_found"
+                "note": "no_truck_found"
             }
         return out
 
-    # ---------- Analitik overload per kandidat (sama seperti sebelumnya, tapi robust) ----------
-    for (x1, y1, x2, y2), _ in zip(cand_boxes, cand_labels):
+    # ---------- Nilai overload per kandidat truk ----------
+    for (x1, y1, x2, y2), candidate_source in zip(cand_boxes, cand_sources):
         # clamp bbox
         x1 = max(0, min(x1, W - 1)); x2 = max(0, min(x2, W - 1))
         y1 = max(0, min(y1, H - 1)); y2 = max(0, min(y2, H - 1))
@@ -658,15 +758,17 @@ def detect_overload(
                 "box": [x1, y1, x2, y2],
                 "overload": False,
                 "ratio": None,
+                "overload_source": "unavailable" if unavailable_note else "specialist",
+                "candidate_source": candidate_source,
                 "bed_line_found": False,
                 "note": "roi_too_small"
             })
             continue
 
-        bed_y = _estimate_bed_line(roi)
+        bed_y = _estimate_bed_line(roi) if enable_heuristic_decision else None
         overload_flag, ratio = False, None
         dbg = {}
-        overload_source = "heuristic"
+        overload_source = "unavailable" if unavailable_note else "specialist"
 
         specialist_match = None
         for det in specialist_detections:
@@ -683,7 +785,7 @@ def detect_overload(
                     "specialist_confidence": float(specialist_match.get("confidence", 0.0)),
                     "specialist_box": specialist_match.get("box"),
                 })
-        elif bed_y is not None and 5 < bed_y < h - 5:
+        elif enable_heuristic_decision and bed_y is not None and 5 < bed_y < h - 5:
             above = roi[:bed_y, :]
             gray_above = _preprocess_roi(above)
             edges = cv2.Canny(gray_above, 80, 160)
@@ -725,15 +827,34 @@ def detect_overload(
             "overload": bool(overload_flag),
             "ratio": float(ratio) if ratio is not None else None,
             "overload_source": overload_source,
+            "candidate_source": candidate_source,
             "bed_line_found": bed_y is not None,
+            **({"note": unavailable_note} if unavailable_note else {}),
             **({"debug": dbg} if return_debug else {})
         })
 
-    out = {"trucks": outputs}
+    has_overload = any(t.get("overload") for t in outputs)
+    if has_overload:
+        plates = _detect_license_plates_with_roboflow(img_bytes)
+        for t in outputs:
+            if t.get("overload"):
+                plate = _match_license_plate(t["box"], plates)
+                if plate:
+                    t["license_plate"] = plate
+
+    out = {
+        "trucks": outputs,
+        "overload_supported": overload_supported or enable_heuristic_decision,
+        "overload_model_source": specialist_source,
+        "decision_policy": "specialist_or_explicit_heuristic" if enable_heuristic_decision else "specialist_only",
+    }
+    if unavailable_note:
+        out["note"] = unavailable_note
     if return_debug:
         out["debug"] = {
             "fallback_used": fb_used,
             "detected_candidates": len(cand_boxes),
+            "enable_heuristic_decision": enable_heuristic_decision,
             "specialist_source": specialist_source,
             "specialist_count": len(specialist_detections),
             "names_map": names_map

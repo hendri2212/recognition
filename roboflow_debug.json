@@ -1,0 +1,40 @@
+{
+  "inference_id": "d84df79c-d003-48a0-8bdb-468214f01346",
+  "time": 0.3524276199750602,
+  "image": {
+    "width": 1265,
+    "height": 711
+  },
+  "predictions": [
+    {
+      "x": 831.0,
+      "y": 595.0,
+      "width": 188.0,
+      "height": 82.0,
+      "confidence": 0.8393399119377136,
+      "class": "License_Plate",
+      "class_id": 1,
+      "detection_id": "cce0f294-09ae-4ccf-a359-c8528ae525cc"
+    },
+    {
+      "x": 1069.0,
+      "y": 121.5,
+      "width": 46.0,
+      "height": 11.0,
+      "confidence": 0.25071844458580017,
+      "class": "License_Plate",
+      "class_id": 1,
+      "detection_id": "c18ce1a1-dfa1-427b-a467-3d5f5591df07"
+    },
+    {
+      "x": 1060.5,
+      "y": 117.5,
+      "width": 37.0,
+      "height": 11.0,
+      "confidence": 0.10218176245689392,
+      "class": "License_Plate",
+      "class_id": 1,
+      "detection_id": "bbcc19ae-5103-4db8-9bbb-5dc204088be8"
+    }
+  ]
+}

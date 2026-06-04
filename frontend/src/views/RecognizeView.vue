@@ -1,220 +1,405 @@
 <template>
-    <div class="card">
-        <div class="card-header">
-            <div class="d-flex justify-content-between align-items-center">
-                <h3 class="card-title mb-0">Live Face Recognition</h3>
-                <div class="btn-group" role="group" aria-label="Basic example">
-                    <button class="btn btn-sm btn-primary" @click="openCameraExternal">Open Camera</button>
-                    <button class="btn btn-sm btn-warning" @click="captureAndRecognize">Recognize</button>
-                    <button class="btn btn-sm btn-secondary" @click="downloadCapture">Download Capture</button>
-                    <button class="btn btn-sm btn-danger" @click="startRecognition">Auto Recognize</button>
-                    <button class="btn btn-sm btn-dark" @click="stopRecognition">Stop Recognize</button>
-                </div>
+    <section class="page-width workflow-page recognize-page">
+        <div class="workflow-heading">
+            <div>
+                <p class="eyebrow">Live recognition</p>
+                <h1>Uji recognition dari kamera</h1>
+            </div>
+            <div class="command-bar" role="group" aria-label="Kontrol recognition">
+                <button class="btn btn-primary" @click="openCameraExternal" title="Buka kamera">
+                    <i class="bi bi-camera-video"></i>
+                    Buka kamera
+                </button>
+                <button class="btn btn-warning" @click="captureAndRecognize" title="Capture dan analisis wajah">
+                    <i class="bi bi-bounding-box"></i>
+                    Recognize
+                </button>
+                <button class="btn btn-outline-secondary" @click="downloadCapture" title="Unduh capture terakhir">
+                    <i class="bi bi-download"></i>
+                </button>
+                <button class="btn btn-outline-danger" @click="startRecognition" title="Mulai auto recognize">
+                    <i class="bi bi-play-fill"></i>
+                </button>
+                <button class="btn btn-dark" @click="stopRecognition" title="Hentikan recognition">
+                    <i class="bi bi-stop-fill"></i>
+                </button>
             </div>
         </div>
-        <div class="card-body shadow">
-            <div class="d-flex">
-                <video ref="video" autoplay playsinline style="width:320px;height:240px;" />
-                <canvas ref="canvas" class="ms-3" style="width:320px;height:240px;display:block;" />
-                <div class="text-start ms-3">
-                    <label class="fw-bold">Nama Lengkap</label>
-                    <div v-if="names.length">
-                        <div class="text-capitalize" v-for="name in names" :key="name">{{ name }}</div>
-                        <div v-if="detections.length" class="text-muted small">
-                            <div v-for="(det, idx) in detections" :key="'meta-'+idx">
-                                <span v-if="det.age !== undefined && det.age !== null">{{ det.age }}</span>
-                                <span v-if="(det.age !== undefined && det.age !== null) && det.gender"> • </span>
-                                <span v-if="det.gender">{{ formatGender(det.gender) }}</span>
-                            </div>
-                        </div>
+
+        <div class="recognize-grid">
+            <div class="workflow-panel live-panel">
+                <div class="panel-head">
+                    <div>
+                        <p class="eyebrow">Capture workspace</p>
+                        <h2>Camera feed</h2>
                     </div>
-                    <div>{{ error }}</div>
+                    <span>{{ recognitionState }}</span>
+                </div>
+
+                <div class="media-grid">
+                    <figure>
+                        <video ref="video" autoplay playsinline></video>
+                        <figcaption>Live input</figcaption>
+                    </figure>
+                    <figure>
+                        <canvas ref="canvas"></canvas>
+                        <figcaption>Capture result</figcaption>
+                    </figure>
                 </div>
             </div>
+
+            <aside class="workflow-panel result-panel">
+                <p class="eyebrow">Detection output</p>
+                <h2>Identitas terdeteksi</h2>
+
+                <div v-if="detections.length" class="identity-list">
+                    <article v-for="(det, idx) in detections" :key="'det-' + idx">
+                        <strong class="text-capitalize">{{ det.name }}</strong>
+                        <span>
+                            <template v-if="det.age !== undefined && det.age !== null">{{ det.age }} tahun</template>
+                            <template v-if="(det.age !== undefined && det.age !== null) && det.gender"> | </template>
+                            <template v-if="det.gender">{{ formatGender(det.gender) }}</template>
+                        </span>
+                    </article>
+                </div>
+                <div v-else class="empty-result">
+                    Belum ada identitas. Buka kamera lalu jalankan recognition.
+                </div>
+
+                <div v-if="error" class="alert alert-danger mb-0">{{ error }}</div>
+            </aside>
         </div>
-    </div>
+    </section>
 </template>
 
 <script setup>
-import { ref, onMounted } from 'vue';
+import { computed, onMounted, onUnmounted, ref } from 'vue'
 
-const video = ref(null);
-const canvas = ref(null);
-const names = ref([]);
-const detections = ref([]);
-const error = ref('');
-let stream = null;
+const video = ref(null)
+const canvas = ref(null)
+const detections = ref([])
+const error = ref('')
+let stream = null
+let intervalId = null
 
-// Format gender nicely in UI
+const recognitionState = computed(() => {
+    if (intervalId) return 'Auto recognition aktif'
+    if (stream) return 'Kamera aktif'
+    return 'Menunggu kamera'
+})
+
 function formatGender(g) {
-    return (g || '').toString().trim().toLowerCase().replace(/^\w/, c => c.toUpperCase());
+    return (g || '').toString().trim().toLowerCase().replace(/^\w/, c => c.toUpperCase())
 }
 
-let intervalId = null;
-
-// Fungsi TTS dengan bahasa Indonesia
 function speak(text) {
     if (!('speechSynthesis' in window)) {
-        console.warn('Browser tidak mendukung Speech Synthesis API');
-        return;
+        console.warn('Browser tidak mendukung Speech Synthesis API')
+        return
     }
-    
-    const utterance = new SpeechSynthesisUtterance(text);
-    
-    // Konfigurasi untuk bahasa Indonesia
-    utterance.lang = 'id-ID';
-    utterance.rate = 0.8;
-    utterance.pitch = 1.0;
-    utterance.volume = 1.0;
-    
-    // Cari voice bahasa Indonesia yang tersedia
-    const voices = speechSynthesis.getVoices();
-    const indonesianVoice = voices.find(voice => 
-        voice.lang.includes('id') || 
+
+    const utterance = new SpeechSynthesisUtterance(text)
+    utterance.lang = 'id-ID'
+    utterance.rate = 0.8
+    utterance.pitch = 1
+    utterance.volume = 1
+
+    const voices = speechSynthesis.getVoices()
+    const indonesianVoice = voices.find(voice =>
+        voice.lang.includes('id') ||
         voice.lang.includes('ID') ||
         voice.name.toLowerCase().includes('indonesia')
-    );
-    
-    if (indonesianVoice) {
-        utterance.voice = indonesianVoice;
-    }
-    
-    // Event handlers untuk debugging (opsional)
-    utterance.onstart = () => {
-        console.log('TTS mulai berbicara:', text);
-    };
-    
-    utterance.onerror = (event) => {
-        console.error('Error TTS:', event.error);
-    };
-    
-    // Jalankan TTS
-    speechSynthesis.speak(utterance);
+    )
+
+    if (indonesianVoice) utterance.voice = indonesianVoice
+    utterance.onerror = event => console.error('Error TTS:', event.error)
+    speechSynthesis.speak(utterance)
 }
 
-// Fungsi untuk memuat voice yang tersedia
 const loadVoices = () => {
-    return new Promise((resolve) => {
-        let voices = speechSynthesis.getVoices();
+    return new Promise(resolve => {
+        let voices = speechSynthesis.getVoices()
         if (voices.length) {
-            resolve(voices);
+            resolve(voices)
         } else {
             speechSynthesis.addEventListener('voiceschanged', () => {
-                voices = speechSynthesis.getVoices();
-                resolve(voices);
-            });
+                voices = speechSynthesis.getVoices()
+                resolve(voices)
+            }, { once: true })
         }
-    });
-};
+    })
+}
 
-// Load voices saat komponen dimount
 onMounted(async () => {
     try {
-        const voices = await loadVoices();
-        const indonesianVoices = voices.filter(voice => 
-            voice.lang.includes('id') || 
-            voice.lang.includes('ID') ||
-            voice.name.toLowerCase().includes('indonesia')
-        );
-        
-        if (indonesianVoices.length > 0) {
-            console.log('Voice Indonesia tersedia:', indonesianVoices.map(v => v.name));
-        } else {
-            console.log('Tidak ada voice Indonesia, menggunakan voice default dengan lang id-ID');
-        }
+        await loadVoices()
     } catch (err) {
-        console.error('Error loading voices:', err);
+        console.error('Error loading voices:', err)
     }
-});
+})
 
 const openCameraExternal = async () => {
-    await navigator.mediaDevices.getUserMedia({ video: true });
-    const devices = await navigator.mediaDevices.enumerateDevices();
-    const cameras = devices.filter(device => device.kind === 'videoinput');
-    const externalKeywords = ['usb', 'external', 'hd', 'logitech', 'creative', 'c922'];
-    let externalCamera = cameras.find(cam =>
-        cam.label && externalKeywords.some(keyword =>
-            cam.label.toLowerCase().includes(keyword)
+    try {
+        await navigator.mediaDevices.getUserMedia({ video: true })
+        const devices = await navigator.mediaDevices.enumerateDevices()
+        const cameras = devices.filter(device => device.kind === 'videoinput')
+        const externalKeywords = ['usb', 'external', 'hd', 'logitech', 'creative', 'c922']
+        const externalCamera = cameras.find(cam =>
+            cam.label && externalKeywords.some(keyword => cam.label.toLowerCase().includes(keyword))
         )
-    );
-    let deviceId = externalCamera?.deviceId || (cameras[1]?.deviceId || cameras[0]?.deviceId);
-    if (!deviceId) {
-        error.value = 'Tidak ada kamera external yang terdeteksi!';
-        return;
-    }
-    if (stream) {
-        stream.getTracks().forEach(track => track.stop());
-    }
-    stream = await navigator.mediaDevices.getUserMedia({
-        video: {
-            deviceId: { exact: deviceId },
-            width: 320,
-            height: 240,
-            aspectRatio: 4 / 3
+        const deviceId = externalCamera?.deviceId || cameras[1]?.deviceId || cameras[0]?.deviceId
+        if (!deviceId) {
+            error.value = 'Tidak ada kamera external yang terdeteksi!'
+            return
         }
-    });
-    video.value.srcObject = stream;
-    await new Promise(resolve => {
-        video.value.onloadedmetadata = () => {
-            canvas.value.width = video.value.videoWidth;
-            canvas.value.height = video.value.videoHeight;
-            resolve();
-        };
-    });
-};
+        if (stream) stream.getTracks().forEach(track => track.stop())
+        stream = await navigator.mediaDevices.getUserMedia({
+            video: {
+                deviceId: { exact: deviceId },
+                width: 320,
+                height: 240,
+                aspectRatio: 4 / 3
+            }
+        })
+        video.value.srcObject = stream
+        await new Promise(resolve => {
+            video.value.onloadedmetadata = () => {
+                canvas.value.width = video.value.videoWidth
+                canvas.value.height = video.value.videoHeight
+                resolve()
+            }
+        })
+        error.value = ''
+    } catch (err) {
+        error.value = 'Gagal membuka kamera: ' + (err?.message || err)
+    }
+}
 
 const captureAndRecognize = async () => {
-    canvas.value.width = video.value.videoWidth;
-    canvas.value.height = video.value.videoHeight;
-    const ctx = canvas.value.getContext('2d');
-    ctx.clearRect(0, 0, canvas.value.width, canvas.value.height);
-    ctx.drawImage(
-        video.value,
-        0, 0, video.value.videoWidth, video.value.videoHeight,
-        0, 0, canvas.value.width, canvas.value.height
-    );
+    if (!video.value?.videoWidth) {
+        error.value = 'Buka kamera sebelum menjalankan recognition.'
+        return
+    }
+    canvas.value.width = video.value.videoWidth
+    canvas.value.height = video.value.videoHeight
+    const ctx = canvas.value.getContext('2d')
+    ctx.clearRect(0, 0, canvas.value.width, canvas.value.height)
+    ctx.drawImage(video.value, 0, 0, video.value.videoWidth, video.value.videoHeight)
+
     await new Promise(resolve => {
         canvas.value.toBlob(async blob => {
-            const formData = new FormData();
-            formData.append('file', blob, 'stream.png');
+            const formData = new FormData()
+            formData.append('file', blob, 'stream.png')
             try {
                 const res = await fetch('http://localhost:8000/recognize', {
                     method: 'POST',
                     body: formData
-                });
-                const data = await res.json();
-                detections.value = (Array.isArray(data) ? data : (data?.results ?? []))
-                    .map(r => ({ name: r?.name ?? 'unknown', age: r?.age ?? null, gender: r?.gender ?? '', box: r?.box, distance: r?.distance }));
-                names.value = data.map(f => f.name);
-                error.value = '';
-                // **Panggil TTS berbahasa Indonesia untuk setiap nama yang valid**
-                data.forEach(item => {
-                    if (item.name && item.name !== 'unknown') {
-                        speak(item.name);
-                    }
-                });
+                })
+                const data = await res.json()
+                const results = Array.isArray(data) ? data : (data?.results ?? [])
+                detections.value = results.map(r => ({
+                    name: r?.name ?? 'unknown',
+                    age: r?.age ?? null,
+                    gender: r?.gender ?? '',
+                    box: r?.box,
+                    distance: r?.distance
+                }))
+                error.value = ''
+                results.forEach(item => {
+                    if (item.name && item.name !== 'unknown') speak(item.name)
+                })
             } catch (err) {
-                error.value = "Gagal mengenali wajah: " + err;
+                error.value = 'Gagal mengenali wajah: ' + err
             }
-            resolve();
-        }, 'image/png');
-    });
-};
+            resolve()
+        }, 'image/png')
+    })
+}
 
 const downloadCapture = () => {
-    const link = document.createElement('a');
-    link.download = `recognize_capture_${Date.now()}.png`;
-    link.href = canvas.value.toDataURL('image/png');
-    link.click();
-};
+    const link = document.createElement('a')
+    link.download = `recognize_capture_${Date.now()}.png`
+    link.href = canvas.value.toDataURL('image/png')
+    link.click()
+}
 
 const startRecognition = () => {
-    if (intervalId) clearInterval(intervalId);
-    intervalId = setInterval(captureAndRecognize, 500);
-};
+    if (intervalId) clearInterval(intervalId)
+    intervalId = setInterval(captureAndRecognize, 500)
+}
 
 const stopRecognition = () => {
-    if (intervalId) clearInterval(intervalId);
-    if (stream) stream.getTracks().forEach(track => track.stop());
-};
+    if (intervalId) clearInterval(intervalId)
+    intervalId = null
+    if (stream) stream.getTracks().forEach(track => track.stop())
+    stream = null
+}
+
+onUnmounted(() => {
+    stopRecognition()
+})
 </script>
+
+<style scoped>
+.workflow-heading {
+    display: grid;
+    grid-template-columns: minmax(320px, 1fr) auto;
+    gap: 24px;
+    align-items: end;
+    margin-bottom: 26px;
+}
+
+.workflow-heading h1 {
+    margin: 0;
+    font-size: 54px;
+    line-height: 1.08;
+}
+
+.command-bar {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+    gap: 10px;
+}
+
+.command-bar .btn {
+    display: inline-flex;
+    min-width: 52px;
+    min-height: 52px;
+    align-items: center;
+    justify-content: center;
+    gap: 9px;
+    border-radius: 8px;
+}
+
+.recognize-grid {
+    display: grid;
+    grid-template-columns: minmax(560px, 1.35fr) minmax(320px, 0.65fr);
+    gap: 22px;
+}
+
+.live-panel,
+.result-panel {
+    padding: 28px;
+}
+
+.panel-head {
+    display: flex;
+    align-items: start;
+    justify-content: space-between;
+    gap: 18px;
+    margin-bottom: 20px;
+}
+
+.panel-head h2,
+.result-panel h2 {
+    margin: 0;
+    font-size: 28px;
+}
+
+.panel-head span {
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    background: var(--surface-soft);
+    color: var(--muted);
+    padding: 9px 12px;
+}
+
+.media-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 16px;
+}
+
+figure {
+    margin: 0;
+    overflow: hidden;
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    background: #0d1823;
+}
+
+video,
+canvas {
+    display: block;
+    width: 100%;
+    aspect-ratio: 4 / 3;
+    object-fit: contain;
+}
+
+figcaption {
+    border-top: 1px solid rgba(255, 255, 255, 0.1);
+    background: #142535;
+    color: rgba(255, 255, 255, 0.74);
+    padding: 12px 14px;
+    font-size: 13px;
+}
+
+.identity-list {
+    display: grid;
+    gap: 12px;
+    margin: 24px 0;
+}
+
+.identity-list article,
+.empty-result {
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    background: var(--surface-soft);
+    padding: 18px;
+}
+
+.identity-list strong,
+.identity-list span {
+    display: block;
+}
+
+.identity-list strong {
+    font-size: 22px;
+}
+
+.identity-list span {
+    margin-top: 5px;
+    color: var(--muted);
+}
+
+.empty-result {
+    margin: 24px 0;
+    color: var(--muted);
+    line-height: 1.6;
+}
+
+@media (max-width: 980px) {
+    .workflow-heading,
+    .recognize-grid {
+        grid-template-columns: 1fr;
+    }
+
+    .command-bar {
+        justify-content: flex-start;
+    }
+
+    .workflow-heading h1 {
+        font-size: 44px;
+    }
+}
+
+@media (max-width: 680px) {
+    .live-panel,
+    .result-panel {
+        padding: 20px;
+    }
+
+    .media-grid {
+        grid-template-columns: 1fr;
+    }
+
+    .panel-head {
+        flex-direction: column;
+    }
+
+    .workflow-heading h1 {
+        font-size: 36px;
+    }
+}
+</style>

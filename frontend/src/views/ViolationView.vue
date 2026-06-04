@@ -1,9 +1,18 @@
 <template>
-    <div class="container py-4">
-        <h3 class="fw-bold mb-3">Traffic & Overload Violation</h3>
+    <div class="page-width workflow-page violation-page">
+        <div class="violation-heading">
+            <div>
+                <p class="eyebrow">Violation analysis</p>
+                <h1>Traffic dan overload detection</h1>
+            </div>
+            <p>
+                Analisis gambar atau video untuk menampilkan deteksi traffic, indikasi tanpa helm,
+                dan overload kendaraan dalam satu modul presentasi.
+            </p>
+        </div>
 
         <!-- Controls -->
-        <div class="card p-3 mb-3">
+        <div class="workflow-panel control-panel p-3 mb-3">
             <div class="row g-3 align-items-end">
                 <div class="col-md-3">
                     <label class="form-label">Mode Deteksi</label>
@@ -67,7 +76,7 @@
         <!-- Preview + Canvas -->
         <div class="row">
             <div class="col-lg-7 mb-3">
-                <div class="card p-2">
+                <div class="workflow-panel preview-card p-2">
                     <div class="text-muted small px-2 pt-2">Preview</div>
                     <div class="position-relative text-center">
                         <video v-if="previewUrl && mode === 'traffic-video'" :src="previewUrl" controls
@@ -87,7 +96,7 @@
 
             <!-- Hasil Deteksi -->
             <div class="col-lg-5 mb-3">
-                <div class="card p-3 h-100">
+                <div class="workflow-panel result-card p-3 h-100">
                     <div class="d-flex justify-content-between align-items-center mb-2">
                         <h6 class="mb-0">Hasil Deteksi</h6>
                         <span class="badge bg-secondary">{{ resultCountLabel }}</span>
@@ -102,6 +111,7 @@
                                 <div>
                                     <div class="fw-semibold">{{ d.label }}</div>
                                     <span v-if="d.helmet_violation" class="badge bg-danger mb-1">NO HELMET</span>
+                                    <span v-if="d.license_plate" class="badge bg-warning text-dark mb-1 ms-1">PLAT: {{ d.license_plate }}</span>
                                     <div class="text-muted small">box: [{{ d.box.join(', ') }}]</div>
                                 </div>
                                 <span class="badge bg-primary rounded-pill">#{{ idx + 1 }}</span>
@@ -111,6 +121,10 @@
 
                     <!-- Overload results -->
                     <div v-else-if="mode === 'over'">
+                        <div v-if="overAnalysis && !overAnalysis.overload_supported"
+                            class="alert alert-warning py-2">
+                            Model overload khusus belum tersedia. Hasil saat ini hanya menampilkan kandidat truk.
+                        </div>
                         <div v-if="overResults.length === 0" class="text-muted small">Belum ada hasil.</div>
                         <ul class="list-group">
                             <li v-for="(t, idx) in overResults" :key="'ov-' + idx"
@@ -118,10 +132,15 @@
                                 <div>
                                     <div class="fw-semibold">
                                         {{ t.label }}
-                                        <span class="ms-2 badge" :class="t.overload ? 'bg-danger' : 'bg-success'">{{
-                                            t.overload ? 'OVERLOAD' : 'Normal' }}</span>
+                                        <span class="ms-2 badge" :class="overloadBadgeClass(t)">
+                                            {{ overloadBadgeLabel(t) }}
+                                        </span>
+                                        <span v-if="t.license_plate" class="badge bg-warning text-dark ms-1">PLAT: {{ t.license_plate }}</span>
                                     </div>
                                     <div class="text-muted small">box: [{{ t.box.join(', ') }}]</div>
+                                    <div v-if="t.candidate_source" class="text-muted small">
+                                        kandidat: {{ t.candidate_source }}
+                                    </div>
                                 </div>
                                 <span class="badge bg-primary rounded-pill">#{{ idx + 1 }}</span>
                             </li>
@@ -207,6 +226,7 @@ const selectedTrafficClasses = ref(trafficClassOptions.map(item => item.value))
 // hasil
 const trafficResults = ref([]) // [{label, box:[x1,y1,x2,y2]}]
 const overResults = ref([])    // [{label, box:[x1,y1,x2,y2], overload:bool}]
+const overAnalysis = ref(null)
 const videoFrames = ref([])
 const videoSummary = ref(null)
 
@@ -241,6 +261,9 @@ const summaryText = computed(() => {
     }
     if (!overResults.value.length) return 'Tidak ada deteksi truk.'
     const total = overResults.value.length
+    if (overAnalysis.value && !overAnalysis.value.overload_supported) {
+        return `Total kandidat truk: ${total}\nStatus overload: belum dinilai\nAlasan: model overload khusus belum tersedia.`
+    }
     const over = overResults.value.filter(t => t.overload).length
     return `Total truk: ${total}\nOverload terindikasi: ${over}\nNormal: ${total - over}`
 })
@@ -266,8 +289,19 @@ function onFileChange(e) {
 function resetResults() {
     trafficResults.value = []
     overResults.value = []
+    overAnalysis.value = null
     videoFrames.value = []
     videoSummary.value = null
+}
+
+function overloadBadgeLabel(truck) {
+    if (overAnalysis.value && !overAnalysis.value.overload_supported) return 'Belum dinilai'
+    return truck.overload ? 'OVERLOAD' : 'Normal'
+}
+
+function overloadBadgeClass(truck) {
+    if (overAnalysis.value && !overAnalysis.value.overload_supported) return 'bg-warning text-dark'
+    return truck.overload ? 'bg-danger' : 'bg-success'
 }
 
 function selectAllTrafficClasses() {
@@ -358,6 +392,15 @@ async function analyze() {
             videoSummary.value = data.summary || null
         } else {
             overResults.value = Array.isArray(data.trucks) ? data.trucks : []
+            overAnalysis.value = {
+                overload_supported: data.overload_supported === true,
+                overload_model_source: data.overload_model_source || 'none',
+                decision_policy: data.decision_policy || 'specialist_only',
+                note: data.note || '',
+            }
+            if (!overAnalysis.value.overload_supported) {
+                info.value = 'Kandidat truk selesai dideteksi. Status overload belum dinilai karena model khusus belum tersedia.'
+            }
         }
 
         await nextTick()
@@ -428,11 +471,21 @@ function drawBoxes() {
 
     if (mode.value === 'traffic') {
         trafficResults.value.forEach((d) => {
-            drawOne(d.box, d.helmet_violation ? '#dc3545' : '#0d6efd', d.label)
+            let drawLabel = d.label
+            if (d.helmet_violation) {
+                drawLabel = d.license_plate ? `NO HELMET - ${d.license_plate}` : 'NO HELMET'
+            }
+            drawOne(d.box, d.helmet_violation ? '#dc3545' : '#0d6efd', drawLabel)
         })
     } else {
         overResults.value.forEach((t) => {
-            drawOne(t.box, t.overload ? '#dc3545' : '#198754', t.overload ? 'OVER' : 'OK') // merah/hijau
+            const supported = overAnalysis.value?.overload_supported
+            const color = supported ? (t.overload ? '#dc3545' : '#198754') : '#db8f25'
+            let label = supported ? (t.overload ? 'OVER' : 'OK') : 'TRUCK'
+            if (t.overload && t.license_plate) {
+                label = `OVER - ${t.license_plate}`
+            }
+            drawOne(t.box, color, label)
         })
     }
 }
@@ -472,12 +525,49 @@ function downloadAnnotated() {
 </script>
 
 <style scoped>
-.container {
-    max-width: 1200px;
+.violation-heading {
+    display: grid;
+    grid-template-columns: minmax(320px, 0.95fr) minmax(360px, 0.7fr);
+    gap: 28px;
+    align-items: end;
+    margin-bottom: 26px;
 }
 
-.card {
-    border-radius: 12px;
+.violation-heading h1 {
+    margin: 0;
+    font-size: 54px;
+    line-height: 1.08;
+}
+
+.violation-heading p:last-child {
+    margin: 0 0 6px;
+    color: var(--muted);
+    font-size: 17px;
+    line-height: 1.6;
+}
+
+.control-panel,
+.preview-card,
+.result-card {
+    border-radius: 8px;
+}
+
+.form-control,
+.form-select,
+.btn {
+    border-radius: 8px;
+}
+
+.control-panel .btn {
+    min-height: 46px;
+}
+
+.preview-card {
+    min-height: 420px;
+}
+
+.result-card {
+    min-height: 420px;
 }
 
 .traffic-class-grid {
@@ -489,5 +579,21 @@ function downloadAnnotated() {
 .video-result-list {
     max-height: 360px;
     overflow: auto;
+}
+
+@media (max-width: 920px) {
+    .violation-heading {
+        grid-template-columns: 1fr;
+    }
+
+    .violation-heading h1 {
+        font-size: 44px;
+    }
+}
+
+@media (max-width: 620px) {
+    .violation-heading h1 {
+        font-size: 36px;
+    }
 }
 </style>

@@ -8,6 +8,7 @@ from app.models.base import Base
 # Import models to register metadata
 import app.models.user
 import app.models.person
+import app.models.vehicle
 
 from app.api.endpoints.register import router as register_router
 from app.api.endpoints.recognize import router as recognize_router
